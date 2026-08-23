@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+dist/
+build/
+*.spec
+测试_*.xlsx
+审查报告.xlsx
