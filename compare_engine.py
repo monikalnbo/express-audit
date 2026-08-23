@@ -13,7 +13,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font
 
 # ---------- 区间重量解析 ----------
-UNIT_FACTOR = {"mg": 0.000001, "g": 0.001, "kg": 1.0,
+UNIT_FACTOR = {"mg": 0.000001, "g": 0.001, "克": 0.001, "kg": 1.0, "公斤": 1.0,
                "吨": 1000.0, "t": 1000.0, "lb": 0.453592, "磅": 0.453592}
 
 def parse_weight_value(text):
@@ -23,7 +23,7 @@ def parse_weight_value(text):
     s = str(text).strip().lower().replace(" ", "")
     if not s:
         return None
-    m = re.search(r"([\d.]+)\s*(mg|kg|g|lb|吨|磅|t)?", s)
+    m = re.search(r"([\d.]+)\s*(mg|kg|lb|吨|磅|公斤|克|[gt])?", s)
     if not m:
         return None
     try:
@@ -65,13 +65,17 @@ def parse_weight_range(text):
         return (v, float("inf"))
 
     # 纯数字也当作区间 [x, x]
-    m = re.fullmatch(r"(\d+(?:\.\d+)?)(kg|g|lb|吨|磅|t)?", s)
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)(mg|kg|lb|吨|磅|公斤|克|[gt])?", s)
     if m:
         v = float(m.group(1)) * UNIT_FACTOR.get(m.group(2) or "kg", 1.0)
         return (v, v)
     return None
 
 def _unit_of(s):
+    if "公斤" in s:
+        return 1.0
+    if "克" in s:
+        return 0.001
     for u in ("mg", "kg", "lb", "吨", "磅"):
         if u in s:
             return UNIT_FACTOR[u]
