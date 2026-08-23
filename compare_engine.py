@@ -8,6 +8,7 @@
   4. 所有异常标注 + 汇总提取到异常表
 """
 import re
+import unicodedata
 import pandas as pd
 from openpyxl.styles import PatternFill, Font
 
@@ -19,7 +20,8 @@ def parse_weight_value(text):
     """解析具体重量, 返回 kg 数值; 失败返回 None"""
     if text is None or (isinstance(text, float) and pd.isna(text)):
         return None
-    s = str(text).strip().lower().replace(" ", "")
+    # NFKC 归一化: 全角数字/字母/横线(１２３ｋｇ－)转半角, 中文Excel手输常见
+    s = unicodedata.normalize("NFKC", str(text)).strip().lower().replace(" ", "")
     if not s:
         return None
     m = re.search(r"([\d.]+)\s*(mg|kg|lb|吨|磅|公斤|千克|克|[gt])?", s)
@@ -40,7 +42,8 @@ def parse_weight_range(text):
     """
     if text is None or (isinstance(text, float) and pd.isna(text)):
         return None
-    s = str(text).strip().lower().replace(" ", "").replace("～", "~").replace("—", "-").replace("–", "-")
+    # NFKC 归一化: 全角字符转半角
+    s = unicodedata.normalize("NFKC", str(text)).strip().lower().replace(" ", "").replace("～", "~").replace("—", "-").replace("–", "-")
     if not s:
         return None
 
@@ -116,9 +119,23 @@ def compare(file_a, file_b,
 
     results = []  # dict: 类型/单号/A数据/B数据/说明
 
+    # 业务规则: 同侧单号重复是重要对账线索(可能是\"一单多包裹\", 也可能是重复录入), 必须提示
+    for side, df, other in (("A", df_a, "B"), ("B", df_b, "A")):
+        vc = df["_key"].value_counts()
+        for k, n in vc[vc > 1].items():
+            results.append({
+                "审查结果": f"提示-{side}方单号重复",
+                "快递单号": k,
+                "A方重量": f"{n}条记录" if side == "A" else None,
+                "B方区间": f"{n}条记录" if side == "B" else None,
+                "说明": f"{side}方该单号出现{n}次, 请人工确认是多包裹还是重复录入",
+                "_row_a": None, "_row_b": None,
+            })
+
     for k in sorted(common):
         rows_a = df_a[df_a["_key"] == k]
         rows_b = df_b[df_b["_key"] == k]
+        n_a, n_b = len(rows_a), len(rows_b)
         for _, ra in rows_a.iterrows():
             for _, rb in rows_b.iterrows():
                 exact = parse_weight_value(ra.get(weight_a))
@@ -129,22 +146,30 @@ def compare(file_a, file_b,
                     "快递单号": k,
                     "A方重量": ra.get(weight_a),
                     "B方区间": rb.get(weight_b),
+                    "A方记录数": n_a,
+                    "B方记录数": n_b,
                     "说明": msg,
                     "_row_a": ra.name + 2,   # Excel 行号(含表头)
                     "_row_b": rb.name + 2,
                 })
 
     for k in sorted(only_a):
-        ra = df_a[df_a["_key"] == k].iloc[0]
+        rows = df_a[df_a["_key"] == k]
+        ra = rows.iloc[0]
         results.append({"审查结果": "异常-B方缺单", "快递单号": k,
                         "A方重量": ra.get(weight_a), "B方区间": None,
-                        "说明": "该单号仅在A方存在", "_row_a": ra.name + 2, "_row_b": None})
+                        "A方记录数": len(rows), "B方记录数": 0,
+                        "说明": "该单号仅在A方存在" + (f"(共{len(rows)}条)" if len(rows) > 1 else ""),
+                        "_row_a": ra.name + 2, "_row_b": None})
 
     for k in sorted(only_b):
-        rb = df_b[df_b["_key"] == k].iloc[0]
+        rows = df_b[df_b["_key"] == k]
+        rb = rows.iloc[0]
         results.append({"审查结果": "异常-A方缺单", "快递单号": k,
                         "A方重量": None, "B方区间": rb.get(weight_b),
-                        "说明": "该单号仅在B方存在", "_row_a": None, "_row_b": rb.name + 2})
+                        "A方记录数": 0, "B方记录数": len(rows),
+                        "说明": "该单号仅在B方存在" + (f"(共{len(rows)}条)" if len(rows) > 1 else ""),
+                        "_row_a": None, "_row_b": rb.name + 2})
 
     return pd.DataFrame(results), df_a, df_b
 
@@ -183,6 +208,7 @@ def export_report(results, file_a, file_b, key_a, key_b,
         "重量不符": int((results["审查结果"] == "重量不符").sum()),
         "仅A方有(B缺单)": int((results["审查结果"] == "异常-B方缺单").sum()),
         "仅B方有(A缺单)": int((results["审查结果"] == "异常-A方缺单").sum()),
+        "单号重复提示": int(results["审查结果"].str.startswith("提示-").sum()),
     }
 
     # 异常行在原表中的行号集合
@@ -203,13 +229,24 @@ def export_report(results, file_a, file_b, key_a, key_b,
         # 3) 标注后的 A 方副本
         wb = writer.book
         df_a = pd.read_excel(file_a, dtype={key_a: str})
+        # 缺单单号的所有行都要标红(不能只标第一条)
+        only_a_keys = set(results.loc[results["审查结果"] == "异常-B方缺单", "快递单号"])
+        miss_a = df_a[key_a].apply(lambda x: str(x).strip() if pd.notna(x) else "").isin(only_a_keys)
+        bad_a |= set(df_a.index[miss_a] + 2)
+        notes_extra = {i + 2: "[异常-B方缺单] 该单号仅在A方存在"
+                       for i in df_a.index[miss_a] if i + 2 not in notes_a}
         df_a["_异常"] = [(i + 2) in bad_a for i in range(len(df_a))]
-        df_a["_说明"] = [notes_a.get(i + 2, "") for i in range(len(df_a))]
+        df_a["_说明"] = [notes_a.get(i + 2) or notes_extra.get(i + 2, "") for i in range(len(df_a))]
         ws = wb.create_sheet("A方标注")
         _annotate_sheet(ws, df_a, key_a, weight_a)
 
         # 4) 标注后的 B 方副本
         df_b = pd.read_excel(file_b, dtype={key_b: str})
+        only_b_keys = set(results.loc[results["审查结果"] == "异常-A方缺单", "快递单号"])
+        miss_b = df_b[key_b].apply(lambda x: str(x).strip() if pd.notna(x) else "").isin(only_b_keys)
+        bad_b |= set(df_b.index[miss_b] + 2)
+        notes_b.update({i + 2: "[异常-A方缺单] 该单号仅在B方存在"
+                        for i in df_b.index[miss_b] if i + 2 not in notes_b})
         df_b["_异常"] = [(i + 2) in bad_b for i in range(len(df_b))]
         df_b["_说明"] = [notes_b.get(i + 2, "") for i in range(len(df_b))]
         ws = wb.create_sheet("B方标注")
