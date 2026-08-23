@@ -6,7 +6,6 @@
 - 输出审查报告(明细/异常提取/双方标注)
 """
 import os
-import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -149,31 +148,27 @@ class App(tk.Tk):
         self.write_log(f"A方: {os.path.basename(fa)}")
         self.write_log(f"B方: {os.path.basename(fb)}")
         self.write_log("正在比对…")
-        threading.Thread(target=self._work, args=(fa, fb, tol), daemon=True).start()
+        # 在主线程取好全部参数再传给工作线程(tkinter 变量非线程安全, 不能在子线程读)
+        threading.Thread(target=self._work, args=(fa, fb, tol, ka, wa, kb, wb),
+                         daemon=True).start()
 
-    def _work(self, fa, fb, tol):
+    def _work(self, fa, fb, tol, ka, wa, kb, wb):
         try:
-            results, *_ = compare(fa, fb,
-                                  key_a=self.key_a.get().strip(),
-                                  weight_a=self.weight_a.get().strip(),
-                                  key_b=self.key_b.get().strip(),
-                                  weight_b=self.weight_b.get().strip(),
-                                  tolerance=tol)
+            results, *_ = compare(fa, fb, key_a=ka, weight_a=wa,
+                                  key_b=kb, weight_b=wb, tolerance=tol)
             out = os.path.join(os.path.dirname(fa), "审查报告.xlsx")
-            summary, out = export_report(results, fa, fb,
-                                         self.key_a.get().strip(), self.key_b.get().strip(),
-                                         self.weight_a.get().strip(), self.weight_b.get().strip(),
+            summary, out = export_report(results, fa, fb, ka, kb, wa, wb,
                                          out_path=out)
             total = len(results)
             abnormal = total - summary["比对一致"]
             self.after(0, self._done, summary, out, abnormal)
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
-            self.after(0, lambda: (self.write_log("❌ 出错: " + err),
+            self.after(0, lambda: (self.write_log("出错: " + err),
                                    messagebox.showerror("错误", err)))
 
     def _done(self, summary, out, abnormal):
-        self.write_log(f"✅ 完成! 一致 {summary['比对一致']} 条 | "
+        self.write_log(f"完成! 一致 {summary['比对一致']} 条 | "
                        f"重量不符 {summary['重量不符']} | 仅A方有 {summary['仅A方有(B缺单)']} | "
                        f"仅B方有 {summary['仅B方有(A缺单)']}")
         self.write_log(f"报告已保存: {out}")

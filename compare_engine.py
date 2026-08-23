@@ -9,11 +9,10 @@
 """
 import re
 import pandas as pd
-from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font
 
 # ---------- 区间重量解析 ----------
-UNIT_FACTOR = {"mg": 0.000001, "g": 0.001, "克": 0.001, "kg": 1.0, "公斤": 1.0,
+UNIT_FACTOR = {"mg": 0.000001, "g": 0.001, "克": 0.001, "kg": 1.0, "公斤": 1.0, "千克": 1.0,
                "吨": 1000.0, "t": 1000.0, "lb": 0.453592, "磅": 0.453592}
 
 def parse_weight_value(text):
@@ -23,7 +22,7 @@ def parse_weight_value(text):
     s = str(text).strip().lower().replace(" ", "")
     if not s:
         return None
-    m = re.search(r"([\d.]+)\s*(mg|kg|lb|吨|磅|公斤|克|[gt])?", s)
+    m = re.search(r"([\d.]+)\s*(mg|kg|lb|吨|磅|公斤|千克|克|[gt])?", s)
     if not m:
         return None
     try:
@@ -53,30 +52,30 @@ def parse_weight_range(text):
         return (min(lo, hi), max(lo, hi))
 
     # 小于/低于/< x
-    m = re.search(r"(?:小于|低于|不超过|<=?<|=?)\s*(\d+(?:\.\d+)?)", s)
-    if m and ("小于" in s or "低于" in s or "不超过" in s or "<" in s):
+    m = re.search(r"(?:小于|低于|不超过|[<≤])\s*(\d+(?:\.\d+)?)", s)
+    if m:
         v = float(m.group(1)) * _unit_of(s)
         return (0.0, v)
 
     # 大于/超过/>= x / 以上
-    m = re.search(r"(?:大于|超过|高于|大于等于|\>=?|以上)\s*(\d+(?:\.\d+)?)", s)
+    m = re.search(r"(?:大于|超过|高于|大于等于|[>≥])\s*(\d+(?:\.\d+)?)", s)
     if m:
         v = float(m.group(1)) * _unit_of(s)
         return (v, float("inf"))
 
     # 纯数字也当作区间 [x, x]
-    m = re.fullmatch(r"(\d+(?:\.\d+)?)(mg|kg|lb|吨|磅|公斤|克|[gt])?", s)
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)(mg|kg|lb|吨|磅|公斤|千克|克|[gt])?", s)
     if m:
         v = float(m.group(1)) * UNIT_FACTOR.get(m.group(2) or "kg", 1.0)
         return (v, v)
     return None
 
 def _unit_of(s):
-    if "公斤" in s:
+    if "公斤" in s or "千克" in s or "kg" in s:
         return 1.0
     if "克" in s:
         return 0.001
-    for u in ("mg", "kg", "lb", "吨", "磅"):
+    for u in ("mg", "lb", "吨", "磅"):
         if u in s:
             return UNIT_FACTOR[u]
     if re.search(r"\d\s*t\b", s):
@@ -91,8 +90,11 @@ def weight_match(exact_kg, range_lr, tolerance=0.0):
         return False, "B方区间无法解析"
     lo, hi = range_lr
     if lo - tolerance <= exact_kg <= hi + tolerance:
-        return True, f"{exact_kg:.3f}kg ∈ [{lo}, {hi}]"
-    return False, f"{exact_kg:.3f}kg ∉ [{lo}, {hi}]"
+        hi_s = "+inf" if hi == float("inf") else f"{hi:g}"
+        lo_s = f"{lo:g}"
+        return True, f"{exact_kg:.3f}kg ∈ [{lo_s}, {hi_s}]"
+    hi_s = "+inf" if hi == float("inf") else f"{hi:g}"
+    return False, f"{exact_kg:.3f}kg ∉ [{lo:g}, {hi_s}]"
 
 # ---------- 主比对逻辑 ----------
 def compare(file_a, file_b,
@@ -101,8 +103,11 @@ def compare(file_a, file_b,
             sheet_a=0, sheet_b=0, tolerance=0.0):
     df_a = pd.read_excel(file_a, sheet_name=sheet_a, dtype={key_a: str})
     df_b = pd.read_excel(file_b, sheet_name=sheet_b, dtype={key_b: str})
-    df_a["_key"] = df_a[key_a].astype(str).str.strip()
-    df_b["_key"] = df_b[key_b].astype(str).str.strip()
+    # 清洗单号: 去掉空值/空串, 避免空单元格被当作单号参与匹配或导致排序崩溃
+    for df, key in ((df_a, key_a), (df_b, key_b)):
+        df["_key"] = df[key].apply(lambda x: str(x).strip() if pd.notna(x) else "")
+        df.dropna(subset=[key], inplace=True)
+        df.drop(df[df["_key"] == ""].index, inplace=True)
 
     keys_a, keys_b = set(df_a["_key"]), set(df_b["_key"])
     only_a = keys_a - keys_b   # B 方缺失
@@ -146,8 +151,6 @@ def compare(file_a, file_b,
 # ---------- 输出: 标注原表 + 异常汇总 ----------
 FILL_RED   = PatternFill("solid", fgColor="FFC7CE")
 FONT_RED   = Font(color="9C0006", bold=True)
-FILL_GREEN = PatternFill("solid", fgColor="C6EFCE")
-FONT_GREEN = Font(color="006100")
 
 def _annotate_sheet(ws, df_rows, key_col, weight_col):
     """把 df_rows(原表数据+异常标记) 写入工作表并标红异常行"""
